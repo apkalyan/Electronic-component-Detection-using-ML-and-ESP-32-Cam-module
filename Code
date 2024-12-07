@@ -1,0 +1,278 @@
+import os
+import zipfile
+import numpy as np
+import cv2
+import requests
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+import tkinter as tk
+import threading
+
+# Define paths to your zip files and classes
+zip_files = [
+    r"C:\Users\kalya\Videos\Dataset\Breadboard.zip",
+    r"C:\Users\kalya\Videos\Dataset\LCD.zip",
+    r"C:\Users\kalya\Videos\Dataset\LED.zip",
+    r"C:\Users\kalya\Videos\Dataset\Battery.zip",
+    r"C:\Users\kalya\Videos\Dataset\Ardiuno.zip",
+    r"C:\Users\kalya\Videos\Dataset\Default.zip"
+]
+
+class_names = ['Breadboard', 'LCD', 'LED', 'Battery', 'Ardiuno', 'Default']
+
+# Extract zip files and organize data into folders
+def extract_zip_files(zip_files, output_dir='dataset'):
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    for zip_file in zip_files:
+        with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+            zip_ref.extractall(output_dir)
+
+# Call the function to extract
+extract_zip_files(zip_files)
+
+# Data Preprocessing: Load images and preprocess them
+def load_images(data_dir, image_size=(128, 128)):
+    images, labels = [], []
+    for label, class_name in enumerate(class_names):
+        class_dir = os.path.join(data_dir, class_name)
+        if not os.path.exists(class_dir):
+            print(f"Warning: {class_dir} does not exist.")
+            continue
+        for img_name in os.listdir(class_dir):
+            img_path = os.path.join(class_dir, img_name)
+            img = cv2.imread(img_path)
+            if img is not None:
+                img = cv2.resize(img, image_size)
+                img = img / 255.0  # Normalize the image
+                images.append(img)
+                labels.append(label)
+    return np.array(images), np.array(labels)
+
+# Load the dataset
+data_dir = 'dataset'
+X, y = load_images(data_dir)
+
+# Split the dataset into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Build the CNN model
+def create_cnn_model(input_shape):
+    model = Sequential([
+        Conv2D(32, (3, 3), activation='relu', input_shape=input_shape),
+        MaxPooling2D((2, 2)),
+        Conv2D(64, (3, 3), activation='relu'),
+        MaxPooling2D((2, 2)),
+        Conv2D(128, (3, 3), activation='relu'),
+        MaxPooling2D((2, 2)),
+        Flatten(),
+        Dense(128, activation='relu'),
+        Dropout(0.5),
+        Dense(len(class_names), activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# Create the CNN model
+input_shape = (128, 128, 3)
+model = create_cnn_model(input_shape)
+
+# Train the model
+history = model.fit(X_train, y_train, epochs=20, validation_data=(X_test, y_test))
+
+# URLs for ESP32 and Mobile Camera feeds
+esp32_url = 'http://192.168.240.50/cam-hi.jpg'
+mobile_url = 'http://192.168.240.20:8080/video'  # Replace with your mobile IP camera URL
+
+# Plot training history and confusion matrix
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.title('Training and Validation Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.title('Training and Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+y_pred = model.predict(X_test)
+y_pred_classes = np.argmax(y_pred, axis=1)
+conf_matrix = confusion_matrix(y_test, y_pred_classes)
+ConfusionMatrixDisplay(conf_matrix, display_labels=class_names).plot(cmap='Blues')
+plt.title('Confusion Matrix')
+plt.show()
+
+
+from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score
+import numpy as np
+
+# Make predictions on the test set
+y_pred = model.predict(X_test)
+y_pred_classes = np.argmax(y_pred, axis=1)  # Convert probabilities to class labels
+
+# Calculate classification metrics
+accuracy = accuracy_score(y_test, y_pred_classes)
+recall = recall_score(y_test, y_pred_classes, average='weighted')
+precision = precision_score(y_test, y_pred_classes, average='weighted')
+f1 = f1_score(y_test, y_pred_classes, average='weighted')
+
+# Print classification metrics
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Recall (Sensitivity): {recall:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"F1 Score: {f1:.4f}")
+
+
+# Real-time Detection using Mobile Camera with Bounding Box Localization
+def detect_component_in_real_time_mobile(model, class_names, mobile_ip, image_size=(128, 128), confidence_threshold=0.6):
+    cap = cv2.VideoCapture(mobile_ip)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame")
+            break
+
+        # Convert frame to grayscale and apply Gaussian blur
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Apply edge detection and find contours
+        edges = cv2.Canny(blurred, 50, 150)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            if w < 50 or h < 50:
+                continue
+
+            roi = frame[y:y + h, x:x + w]
+            resized_roi = cv2.resize(roi, image_size)
+            normalized_roi = resized_roi / 255.0
+            input_frame = np.expand_dims(normalized_roi, axis=0)
+
+            prediction = model.predict(input_frame)
+            predicted_class = np.argmax(prediction)
+            predicted_label = class_names[predicted_class]
+            confidence = np.max(prediction)
+
+            if confidence > confidence_threshold:
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(frame, f'{predicted_label} ({confidence*100:.2f}%)', (x, y - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+        cv2.imshow('Real-time Component Detection - Mobile', frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+# Tkinter Camera Application Class
+class CameraApp:
+    def __init__(self, root, model, class_names):
+        self.root = root
+        self.model = model
+        self.class_names = class_names
+        self.stop_event = threading.Event()
+        
+        # Set up UI elements
+        self.root.title("Multi-Camera Detection")
+        self.root.geometry("300x200")
+        
+        self.esp32_button = tk.Button(root, text="Start ESP32-CAM", command=self.start_esp32_cam)
+        self.esp32_button.pack(pady=5)
+        
+        self.mobile_button = tk.Button(root, text="Start Mobile Camera", command=self.start_mobile_cam)
+        self.mobile_button.pack(pady=5)
+        
+        self.laptop_button = tk.Button(root, text="Start Laptop Camera", command=self.start_laptop_cam)
+        self.laptop_button.pack(pady=5)
+
+        self.stop_button = tk.Button(root, text="Stop All Cameras", command=self.stop_all_cams)
+        self.stop_button.pack(pady=5)
+        
+    def start_esp32_cam(self):
+        self.stop_event.clear()
+        threading.Thread(target=self.detect_component, args=(esp32_url,)).start()
+
+    def start_mobile_cam(self):
+        self.stop_event.clear()
+        threading.Thread(target=detect_component_in_real_time_mobile, args=(self.model, self.class_names, mobile_url)).start()
+
+    def start_laptop_cam(self):
+        self.stop_event.clear()
+        threading.Thread(target=self.detect_component, args=(0,)).start()  # '0' for laptop webcam
+
+    def stop_all_cams(self):
+        self.stop_event.set()
+        
+    def detect_component(self, source, image_size=(128, 128), confidence_threshold=0.6, min_area=3000):
+        # Detection logic for ESP32 and laptop cameras
+        cap = cv2.VideoCapture(source) if isinstance(source, int) else None
+
+        while not self.stop_event.is_set():
+            if isinstance(source, str):
+                response = requests.get(source)
+                if response.status_code != 200:
+                    print("Failed to grab frame")
+                    break
+                img_array = np.frombuffer(response.content, np.uint8)
+                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            else:
+                ret, frame = cap.read()
+                if not ret:
+                    print("Failed to grab frame")
+                    break
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            edges = cv2.Canny(blurred, 50, 150)
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for contour in contours:
+                x, y, w, h = cv2.boundingRect(contour)
+                if cv2.contourArea(contour) < min_area:
+                    continue
+
+                roi = frame[y:y+h, x:x+w]
+                resized_roi = cv2.resize(roi, image_size)
+                normalized_roi = resized_roi / 255.0
+                input_frame = np.expand_dims(normalized_roi, axis=0)
+
+                prediction = model.predict(input_frame)
+                predicted_class = np.argmax(prediction)
+                confidence = np.max(prediction)
+
+                if confidence > confidence_threshold:
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    cv2.putText(frame, f'{class_names[predicted_class]} ({confidence*100:.2f}%)',
+                                (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            cv2.imshow("Camera Detection", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        if cap is not None:
+            cap.release()
+        cv2.destroyAllWindows()
+
+# Start the Tkinter app
+root = tk.Tk()
+app = CameraApp(root, model, class_names)
+root.mainloop()
